@@ -91,7 +91,7 @@ def contenedor_monitoreo_vivo():
     
     try:
         # Petición al feed general en directo de Flashscore Peru
-        url_feed_vivo = "https://2.ds.flashscore.com.br/v1/b/e/live_pe_1"
+        url_feed_vivo = "https://www.flashscore.pe/"
         response = requests.get(url_feed_vivo, headers=HEADERS, timeout=5)
         
         if response.status_code != 200:
