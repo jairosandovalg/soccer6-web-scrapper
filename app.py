@@ -1,33 +1,20 @@
-import os
-import sys
 import streamlit as st
 import pandas as pd
 import time
-import subprocess
 import requests
-
-# --- 1. COMPROBACIÓN E INSTALACIÓN DE LOS BINARIOS ---
-if 'navegador_configurado' not in st.session_state:
-    with st.spinner("Inicializando entorno de simulación... (Solo la primera vez)"):
-        try:
-            # Instalación limpia del binario ejecutable
-            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-            st.session_state['navegador_configurado'] = True
-        except Exception as e:
-            st.error(f"Error de inicialización: {str(e)}")
-            st.stop()
-            
-    from playwright.sync_api import sync_playwright
-    st.rerun()
-
-from playwright.sync_api import sync_playwright
 
 # Configuración de la interfaz de Streamlit
 st.set_page_config(page_title="Bot de Estadísticas Final", layout="wide")
 st.title("📊 Monitor de Estadísticas en Vivo - Flashscore & Telegram")
-st.subheader("Análisis de métricas en tiempo real con alertas automatizadas")
+st.subheader("Análisis de métricas en tiempo real con alertas automatizadas y cuotas de Betano")
 
-# --- 2. FUNCIÓN DE ENVÍO A TELEGRAM ---
+# Encabezados para simular una petición de navegador común y evitar bloqueos de API
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "X-Fsign": "SW9D1e1L"  # Firma requerida por los servidores de Flashscore
+}
+
+# --- 1. FUNCIÓN DE ENVÍO A TELEGRAM ---
 def enviar_resumen_telegram(df):
     TOKEN = "892395866:AAES1dc4LAsedUKUsGR4p5D1SkaMt7nKyes"
     CHAT_ID = "7272170952"  
@@ -51,149 +38,116 @@ def enviar_resumen_telegram(df):
             
             mensaje += "───────────────────\n"
         
-        url_api = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}
-        
         try:
-            requests.post(url_api, json=payload, timeout=10)
+            requests.post(f"https://api.telegram.org/bot{TOKEN}/sendMessage", json={"chat_id": CHAT_ID, "text": mensaje, "parse_mode": "Markdown"}, timeout=10)
             st.toast("✅ Resumen enviado con éxito a Telegram", icon="✉️")
         except Exception:
             pass
 
-# --- 3. EXTRACCIÓN DE DATOS DE PARTIDOS ---
-def extraer_estadisticas_partido(context, url_partido):
-    datos_partido = {
-        "Marcador": "- - -", "Tiempo/Estado": "-", "Minuto": "-", 
-        "Betano 1": "-", "Betano X": "-", "Betano 2": "-", 
-        "Stats": {}
-    }
-    page = None
+# --- 2. EXTRACCIÓN DE DATOS API (PROCESAMIENTO INTERNO) ---
+def obtener_datos_partido_api(id_partido):
+    datos = {"Betano 1": "-", "Betano X": "-", "Betano 2": "-", "Stats": {}}
+    
+    # URL del feed de cuotas directo de Flashscore para el partido
+    url_cuotas = f"https://2.ds.flashscore.com.br/v1/b/e/odds_1x2_live_{id_partido}_pe_1"
+    # URL del feed de estadísticas directo de Flashscore para el partido
+    url_stats = f"https://2.ds.flashscore.com.br/v1/b/e/stats_{id_partido}_0"
+    
+    # 2.1 Extracción de las 3 columnas de cuotas de Betano
     try:
-        page = context.new_page()
-        page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "stylesheet"] else route.continue_())
-        
-        page.goto(url_partido, timeout=7000, wait_until="domcontentloaded")
-        page.wait_for_selector("div.detailScore__wrapper", timeout=4000)
-        
-        # Datos base
-        if page.locator("div.detailScore__wrapper").first.count() > 0:
-            datos_partido["Marcador"] = page.locator("div.detailScore__wrapper").first.text_content().strip()
-        if page.locator("span.fixedHeaderDuel__detailStatus").first.count() > 0:
-            datos_partido["Tiempo/Estado"] = page.locator("span.fixedHeaderDuel__detailStatus").first.text_content().strip()
-        if page.locator("span.eventTime").first.count() > 0:
-            datos_partido["Minuto"] = page.locator("span.eventTime").first.text_content().strip()
-            
-        # Extracción de tus 3 columnas de Betano
-        boton_cuotas = page.locator("//button[@role='tab' and contains(., 'Cuotas')]").first
-        if boton_cuotas.count() > 0:
-            boton_cuotas.click(timeout=1000)
-            page.wait_for_selector("div[data-analytics-element='ODDS_COMPARISONS_INTERACTIVE_ROW']", timeout=2000)
-            
-            fila_betano = page.locator("div[data-analytics-element='ODDS_COMPARISONS_INTERACTIVE_ROW']:has(a[title*='Betano'])").first
-            if fila_betano.count() > 0:
-                celdas_cuotas = fila_betano.locator("span[data-testid='wcl-oddsValue']").all()
-                if len(celdas_cuotas) >= 3:
-                    datos_partido["Betano 1"] = celdas_cuotas[0].text_content().strip()
-                    datos_partido["Betano X"] = celdas_cuotas[1].text_content().strip()
-                    datos_partido["Betano 2"] = celdas_cuotas[2].text_content().strip()
-            
-        # Extracción de Estadísticas habituales
-        boton_stats = page.locator("//button[@role='tab' and contains(., 'Estadísticas')]").first
-        if boton_stats.count() > 0:
-            boton_stats.click(timeout=1000)
-            page.wait_for_selector("div[data-testid='wcl-statistics']", timeout=2000)
-            
-            for fila in page.locator("div[data-testid='wcl-statistics']").all():
-                cat_el = fila.locator("div[data-testid='wcl-statistics-category']").first
-                if cat_el.count() > 0:
-                    categoria = cat_el.text_content().strip()
-                    h_el = fila.locator("div[class*='wcl-homeValue']").first
-                    v_el = fila.locator("div[class*='wcl-awayValue']").first
-                    
-                    datos_partido["Stats"][f"{categoria} (L)"] = h_el.text_content().strip() if h_el.count() > 0 else "0"
-                    datos_partido["Stats"][f"{categoria} (V)"] = v_el.text_content().strip() if v_el.count() > 0 else "0"
-    except Exception:
+        res_cuotas = requests.get(url_cuotas, headers=HEADERS, timeout=4)
+        if res_cuotas.status_code == 200:
+            json_cuotas = res_cuotas.json()
+            # Buscamos el ID de casa de apuestas correspondiente a Betano (ID: 660)
+            for bookmaker in json_cuotas.get("odds", []):
+                if bookmaker.get("bookmaker_id") == 660:
+                    datos["Betano 1"] = str(bookmaker.get("odds_1", "-"))
+                    datos["Betano X"] = str(bookmaker.get("odds_x", "-"))
+                    datos["Betano 2"] = str(bookmaker.get("odds_2", "-"))
+                    break
+    except:
         pass
-    finally:
-        if page: page.close()
-    return datos_partido
 
-# --- 4. CONTENEDOR DINÁMICO AUTOMÁTICO (FRAGMENT) ---
+    # 2.2 Extracción de estadísticas de juego
+    try:
+        res_stats = requests.get(url_stats, headers=HEADERS, timeout=4)
+        if res_stats.status_code == 200:
+            json_stats = res_stats.json()
+            for grupo in json_stats.get("stages", []):
+                for stat in grupo.get("stats", []):
+                    nombre_stat = stat.get("name", "Métrica")
+                    datos["Stats"][f"{nombre_stat} (L)"] = str(stat.get("home_value", "0"))
+                    datos["Stats"][f"{nombre_stat} (V)"] = str(stat.get("away_value", "0"))
+    except:
+        pass
+        
+    return datos
+
+# --- 3. CONTENEDOR DINÁMICO AUTOMÁTICO (FRAGMENT) ---
 @st.fragment
 def contenedor_monitoreo_vivo():
-    st.caption(f"🔄 Última actualización: **{time.strftime('%H:%M:%S')}** (Filtro Betano activo)")
+    st.caption(f"🔄 Última actualización de la API: **{time.strftime('%H:%M:%S')}** (Escaneo cada 1 min)")
     tabla_placeholder = st.empty()
     
-    with sync_playwright() as p:
-        browser = None
-        context = None
-        try:
-            # Iniciamos con argumentos que fuerzan el modo Shell headless estricto (no requiere librerías X11/gráficas de Linux)
-            browser = p.chromium.launch(
-                headless=True, 
-                args=[
-                    "--no-sandbox", 
-                    "--disable-dev-shm-usage", 
-                    "--disable-gpu", 
-                    "--disable-software-rasterizer",
-                    "--single-process"
-                ]
-            )
-            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+    try:
+        # Petición al feed general en directo de Flashscore Peru
+        url_feed_vivo = "https://2.ds.flashscore.com.br/v1/b/e/live_pe_1"
+        response = requests.get(url_feed_vivo, headers=HEADERS, timeout=5)
+        
+        if response.status_code != 200:
+            st.error("Error al conectar con el servidor de datos de Flashscore.")
+            return
             
-            main_page = context.new_page()
-            main_page.goto("https://www.flashscore.pe/", wait_until="domcontentloaded")
+        json_feed = response.json()
+        lista_registros_finales = []
+        
+        # Procesamos los primeros 8 partidos del feed en directo
+        partidos_activos = json_feed.get("matches", [])[:8]
+        
+        if not partidos_activos:
+            st.warning("No se encontraron encuentros activos EN DIRECTO en este momento.")
+            return
             
-            boton_directo = main_page.locator("//div[contains(@class, 'filters__text') and text()='EN DIRECTO']")
-            boton_directo.wait_for(state="visible", timeout=10000)
-            boton_directo.click()
+        for partido in partidos_activos:
+            id_partido = partido.get("id")
+            nom_local = partido.get("home_team", "Local")
+            nom_visitante = partido.get("away_team", "Visitante")
             
-            time.sleep(2.5)
-            partidos_elementos = main_page.locator("div[id^='g_1_']").all()
+            marcador_home = partido.get("home_score", "0")
+            marcador_away = partido.get("away_score", "0")
+            minuto_actual = partido.get("status_time", "-")
+            estado_juego = partido.get("status_name", "En Vivo")
             
-            if partidos_elementos:
-                lista_registros_finales = []
-                for fila in partidos_elementos[:8]:
-                    id_partido = fila.get_attribute("id").split('_')[-1]
-                    url_match_stats = f"https://www.flashscore.pe/partido/{id_partido}/#/resumen/estadisticas"
-                    
-                    l_el = fila.locator("div[class*='home'][class*='participant']").first
-                    v_el = fila.locator("div[class*='away'][class*='participant']").first
-                    nom_local = l_el.text_content().strip() if l_el.count() > 0 else "Local"
-                    nom_visitante = v_el.text_content().strip() if v_el.count() > 0 else "Visitante"
-                    
-                    resultado_profundo = extraer_estadisticas_partido(context, url_match_stats)
-                    
-                    registro = {
-                        "Partido en Vivo": f"{nom_local} vs {nom_visitante}",
-                        "Marcador": resultado_profundo["Marcador"],
-                        "Tiempo/Estado": resultado_profundo["Tiempo/Estado"],
-                        "Minuto": resultado_profundo["Minuto"],
-                        "Betano 1": resultado_profundo["Betano 1"],
-                        "Betano X": resultado_profundo["Betano X"],
-                        "Betano 2": resultado_profundo["Betano 2"]
-                    }
-                    registro.update(resultado_profundo["Stats"])
-                    lista_registros_finales.append(registro)
-                
-                if lista_registros_finales:
-                    df_final = pd.DataFrame(lista_registros_finales).fillna("-")
-                    columnas_fijas = ["Partido en Vivo", "Marcador", "Tiempo/Estado", "Minuto", "Betano 1", "Betano X", "Betano 2"]
-                    columnas_stats = [col for col in df_final.columns if col not in columnas_fijas]
-                    df_final = df_final[columnas_fijas + columnas_stats]
-                    
-                    tabla_placeholder.dataframe(df_final, use_container_width=True)
-                    enviar_resumen_telegram(df_final)
-                    
-        except Exception as e:
-            st.error(f"Error en la sesión del navegador: {str(e)}")
-        finally:
-            if context: context.close()
-            if browser: browser.close()
+            # Consultamos los feeds internos de cuotas y estadísticas por ID
+            detalles = obtener_datos_partido_api(id_partido)
+            
+            registro = {
+                "Partido en Vivo": f"{nom_local} vs {nom_visitante}",
+                "Marcador": f"{marcador_home} - {marcador_away}",
+                "Tiempo/Estado": estado_juego,
+                "Minuto": f"{minuto_actual}'" if minuto_actual.isdigit() else minuto_actual,
+                "Betano 1": detalles["Betano 1"],
+                "Betano X": detalles["Betano X"],
+                "Betano 2": detalles["Betano 2"]
+            }
+            registro.update(detalles["Stats"])
+            lista_registros_finales.append(registro)
+            
+        if lista_registros_finales:
+            df_final = pd.DataFrame(lista_registros_finales).fillna("-")
+            columnas_fijas = ["Partido en Vivo", "Marcador", "Tiempo/Estado", "Minuto", "Betano 1", "Betano X", "Betano 2"]
+            columnas_stats = [col for col in df_final.columns if col not in columnas_fijas]
+            df_final = df_final[columnas_fijas + columnas_stats]
+            
+            tabla_placeholder.dataframe(df_final, use_container_width=True)
+            enviar_resumen_telegram(df_final)
+            
+    except Exception as e:
+        st.error(f"Error en la sincronización de datos: {str(e)}")
 
     time.sleep(60)
     st.rerun()
 
-# --- 5. RENDERIZADO PRINCIPAL ---
+# --- 4. RENDERIZADO PRINCIPAL ---
 st.write("### 📈 Cuadro de Control General (Actualización Automática)")
 contenedor_monitoreo_vivo()
