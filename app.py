@@ -3,33 +3,29 @@ import sys
 import streamlit as st
 import pandas as pd
 import time
+import subprocess
 import requests
 
-# Cambiamos a las herramientas portátiles de Selenium
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
+# --- 1. COMPROBACIÓN E INSTALACIÓN DE LOS BINARIOS ---
+if 'navegador_configurado' not in st.session_state:
+    with st.spinner("Inicializando entorno de simulación... (Solo la primera vez)"):
+        try:
+            # Instalación limpia del binario ejecutable
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+            st.session_state['navegador_configurado'] = True
+        except Exception as e:
+            st.error(f"Error de inicialización: {str(e)}")
+            st.stop()
+            
+    from playwright.sync_api import sync_playwright
+    st.rerun()
+
+from playwright.sync_api import sync_playwright
 
 # Configuración de la interfaz de Streamlit
 st.set_page_config(page_title="Bot de Estadísticas Final", layout="wide")
 st.title("📊 Monitor de Estadísticas en Vivo - Flashscore & Telegram")
 st.subheader("Análisis de métricas en tiempo real con alertas automatizadas")
-
-# --- 1. CONFIGURACIÓN DEL NAVEGADOR PORTABLE ---
-def iniciar_navegador():
-    chrome_options = Options()
-    chrome_options.add_argument("--headless=new")  # Modo oculto eficiente para servidores
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-    
-    # Esto descarga e instala el binario directamente en el entorno de Python, sin tocar Linux
-    from webdriver_manager.chrome import ChromeDriverManager
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    return driver
 
 # --- 2. FUNCIÓN DE ENVÍO A TELEGRAM ---
 def enviar_resumen_telegram(df):
@@ -42,7 +38,6 @@ def enviar_resumen_telegram(df):
         for _, fila in df.iterrows():
             mensaje += f"⚽ *{fila['Partido en Vivo']}*\n"
             mensaje += f"🏆 *Marcador:* `{fila['Marcador']}` | *Min:* `{fila['Minuto']}`\n"
-            # Incluimos tus 3 columnas de Betano en el cuerpo del mensaje de Telegram
             mensaje += f"💰 *Betano:* [1: {fila['Betano 1']}] [X: {fila['Betano X']}] [2: {fila['Betano 2']}]\n"
             
             stats_disponibles = []
@@ -66,142 +61,135 @@ def enviar_resumen_telegram(df):
             pass
 
 # --- 3. EXTRACCIÓN DE DATOS DE PARTIDOS ---
-def extraer_estadisticas_partido(driver, url_partido):
-    # Inicializamos las 3 columnas de Betano solicitadas
+def extraer_estadisticas_partido(context, url_partido):
     datos_partido = {
         "Marcador": "- - -", "Tiempo/Estado": "-", "Minuto": "-", 
         "Betano 1": "-", "Betano X": "-", "Betano 2": "-", 
         "Stats": {}
     }
+    page = None
     try:
-        driver.get(url_partido)
-        time.sleep(2)  # Pausa breve para asegurar la carga del DOM
+        page = context.new_page()
+        page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "font", "stylesheet"] else route.continue_())
         
-        # Datos principales del marcador
-        try: datos_partido["Marcador"] = driver.find_element(By.CSS_SELECTOR, "div.detailScore__wrapper").text.replace("\n", " ").strip()
-        except: pass
-        try: datos_partido["Tiempo/Estado"] = driver.find_element(By.CSS_SELECTOR, "span.fixedHeaderDuel__detailStatus").text.strip()
-        except: pass
-        try: datos_partido["Minuto"] = driver.find_element(By.CSS_SELECTOR, "span.eventTime").text.strip()
-        except: pass
+        page.goto(url_partido, timeout=7000, wait_until="domcontentloaded")
+        page.wait_for_selector("div.detailScore__wrapper", timeout=4000)
+        
+        # Datos base
+        if page.locator("div.detailScore__wrapper").first.count() > 0:
+            datos_partido["Marcador"] = page.locator("div.detailScore__wrapper").first.text_content().strip()
+        if page.locator("span.fixedHeaderDuel__detailStatus").first.count() > 0:
+            datos_partido["Tiempo/Estado"] = page.locator("span.fixedHeaderDuel__detailStatus").first.text_content().strip()
+        if page.locator("span.eventTime").first.count() > 0:
+            datos_partido["Minuto"] = page.locator("span.eventTime").first.text_content().strip()
             
-        # EXTRAER TUS 3 NUEVOS CAMPOS DESDE LA PESTAÑA CUOTAS
-        try:
-            boton_cuotas = driver.find_element(By.XPATH, "//button[@role='tab' and contains(., 'Cuotas')]")
-            boton_cuotas.click()
-            time.sleep(1.2)
+        # Extracción de tus 3 columnas de Betano
+        boton_cuotas = page.locator("//button[@role='tab' and contains(., 'Cuotas')]").first
+        if boton_cuotas.count() > 0:
+            boton_cuotas.click(timeout=1000)
+            page.wait_for_selector("div[data-analytics-element='ODDS_COMPARISONS_INTERACTIVE_ROW']", timeout=2000)
             
-            # Localizar la fila interactiva de Betano según el código HTML compartido
-            fila_betano = driver.find_element(By.XPATH, "//div[@data-analytics-element='ODDS_COMPARISONS_INTERACTIVE_ROW' and .//a[contains(@title, 'Betano')]]")
-            celdas_cuotas = fila_betano.find_elements(By.XPATH, ".//span[@data-testid='wcl-oddsValue']")
+            fila_betano = page.locator("div[data-analytics-element='ODDS_COMPARISONS_INTERACTIVE_ROW']:has(a[title*='Betano'])").first
+            if fila_betano.count() > 0:
+                celdas_cuotas = fila_betano.locator("span[data-testid='wcl-oddsValue']").all()
+                if len(celdas_cuotas) >= 3:
+                    datos_partido["Betano 1"] = celdas_cuotas[0].text_content().strip()
+                    datos_partido["Betano X"] = celdas_cuotas[1].text_content().strip()
+                    datos_partido["Betano 2"] = celdas_cuotas[2].text_content().strip()
             
-            if len(celdas_cuotas) >= 3:
-                datos_partido["Betano 1"] = celdas_cuotas[0].text.strip()
-                datos_partido["Betano X"] = celdas_cuotas[1].text.strip()
-                datos_partido["Betano 2"] = celdas_cuotas[2].text.strip()
-        except:
-            pass
+        # Extracción de Estadísticas habituales
+        boton_stats = page.locator("//button[@role='tab' and contains(., 'Estadísticas')]").first
+        if boton_stats.count() > 0:
+            boton_stats.click(timeout=1000)
+            page.wait_for_selector("div[data-testid='wcl-statistics']", timeout=2000)
             
-        # Extraer Estadísticas del partido
-        try:
-            boton_stats = driver.find_element(By.XPATH, "//button[@role='tab' and contains(., 'Estadísticas')]")
-            boton_stats.click()
-            time.sleep(1)
-            
-            filas = driver.find_elements(By.XPATH, "//div[@data-testid='wcl-statistics']")
-            for fila in filas:
-                try:
-                    categoria = fila.find_element(By.XPATH, ".//div[@data-testid='wcl-statistics-category']").text.strip()
-                    val_home = fila.find_element(By.XPATH, ".//div[contains(@class, 'wcl-homeValue')]").text.strip()
-                    val_away = fila.find_element(By.XPATH, ".//div[contains(@class, 'wcl-awayValue')]").text.strip()
+            for fila in page.locator("div[data-testid='wcl-statistics']").all():
+                cat_el = fila.locator("div[data-testid='wcl-statistics-category']").first
+                if cat_el.count() > 0:
+                    categoria = cat_el.text_content().strip()
+                    h_el = fila.locator("div[class*='wcl-homeValue']").first
+                    v_el = fila.locator("div[class*='wcl-awayValue']").first
                     
-                    datos_partido["Stats"][f"{categoria} (L)"] = val_home
-                    datos_partido["Stats"][f"{categoria} (V)"] = val_away
-                except:
-                    pass
-        except:
-            pass
-            
+                    datos_partido["Stats"][f"{categoria} (L)"] = h_el.text_content().strip() if h_el.count() > 0 else "0"
+                    datos_partido["Stats"][f"{categoria} (V)"] = v_el.text_content().strip() if v_el.count() > 0 else "0"
     except Exception:
         pass
+    finally:
+        if page: page.close()
     return datos_partido
 
 # --- 4. CONTENEDOR DINÁMICO AUTOMÁTICO (FRAGMENT) ---
 @st.fragment
 def contenedor_monitoreo_vivo():
-    st.caption(f"🔄 Última actualización: **{time.strftime('%H:%M:%S')}** (Escaneo automático cada 1 min)")
-    
-    estado_placeholder = st.empty()
+    st.caption(f"🔄 Última actualización: **{time.strftime('%H:%M:%S')}** (Filtro Betano activo)")
     tabla_placeholder = st.empty()
-
-    estado_placeholder.info("Abriendo el navegador virtual en directo...")
     
-    driver = None
-    try:
-        driver = iniciar_navegador()
-        driver.get("https://www.flashscore.pe/")
-        time.sleep(3)
-        
-        # Filtrar por EN DIRECTO
-        boton_directo = driver.find_element(By.XPATH, "//div[contains(@class, 'filters__text') and text()='EN DIRECTO']")
-        boton_directo.click()
-        time.sleep(3)
-        
-        partidos_elementos = driver.find_elements(By.XPATH, "//div[starts-with(@id, 'g_1_')]")
-        
-        if not partidos_elementos:
-            estado_placeholder.warning("No hay encuentros en vivo en este momento.")
-        else:
-            partidos_filtrados = partidos_elementos[:8] 
-            estado_placeholder.success(f"Procesando {len(partidos_filtrados)} partidos activos...")
+    with sync_playwright() as p:
+        browser = None
+        context = None
+        try:
+            # Iniciamos con argumentos que fuerzan el modo Shell headless estricto (no requiere librerías X11/gráficas de Linux)
+            browser = p.chromium.launch(
+                headless=True, 
+                args=[
+                    "--no-sandbox", 
+                    "--disable-dev-shm-usage", 
+                    "--disable-gpu", 
+                    "--disable-software-rasterizer",
+                    "--single-process"
+                ]
+            )
+            context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
             
-            lista_registros_finales = []
-            ids_partidos = []
+            main_page = context.new_page()
+            main_page.goto("https://www.flashscore.pe/", wait_until="domcontentloaded")
             
-            # Recopilar identificadores fijos para evitar pérdidas de referencia en bucle
-            for fila in partidos_filtrados:
-                try:
+            boton_directo = main_page.locator("//div[contains(@class, 'filters__text') and text()='EN DIRECTO']")
+            boton_directo.wait_for(state="visible", timeout=10000)
+            boton_directo.click()
+            
+            time.sleep(2.5)
+            partidos_elementos = main_page.locator("div[id^='g_1_']").all()
+            
+            if partidos_elementos:
+                lista_registros_finales = []
+                for fila in partidos_elementos[:8]:
                     id_partido = fila.get_attribute("id").split('_')[-1]
-                    local_text = fila.find_element(By.XPATH, ".//div[contains(@class, 'home') and contains(@class, 'participant')]").text.strip()
-                    away_text = fila.find_element(By.XPATH, ".//div[contains(@class, 'away') and contains(@class, 'participant')]").text.strip()
-                    ids_partidos.append((id_partido, local_text, away_text))
-                except:
-                    pass
-            
-            # Escanear métricas individuales por partido
-            for id_partido, nom_local, nom_visitante in ids_partidos:
-                url_match_stats = f"https://www.flashscore.pe/partido/{id_partido}/#/resumen/estadisticas"
-                resultado_profundo = extraer_estadisticas_partido(driver, url_match_stats)
+                    url_match_stats = f"https://www.flashscore.pe/partido/{id_partido}/#/resumen/estadisticas"
+                    
+                    l_el = fila.locator("div[class*='home'][class*='participant']").first
+                    v_el = fila.locator("div[class*='away'][class*='participant']").first
+                    nom_local = l_el.text_content().strip() if l_el.count() > 0 else "Local"
+                    nom_visitante = v_el.text_content().strip() if v_el.count() > 0 else "Visitante"
+                    
+                    resultado_profundo = extraer_estadisticas_partido(context, url_match_stats)
+                    
+                    registro = {
+                        "Partido en Vivo": f"{nom_local} vs {nom_visitante}",
+                        "Marcador": resultado_profundo["Marcador"],
+                        "Tiempo/Estado": resultado_profundo["Tiempo/Estado"],
+                        "Minuto": resultado_profundo["Minuto"],
+                        "Betano 1": resultado_profundo["Betano 1"],
+                        "Betano X": resultado_profundo["Betano X"],
+                        "Betano 2": resultado_profundo["Betano 2"]
+                    }
+                    registro.update(resultado_profundo["Stats"])
+                    lista_registros_finales.append(registro)
                 
-                registro = {
-                    "Partido en Vivo": f"{nom_local} vs {nom_visitante}",
-                    "Marcador": resultado_profundo["Marcador"],
-                    "Tiempo/Estado": resultado_profundo["Tiempo/Estado"],
-                    "Minuto": resultado_profundo["Minuto"],
-                    "Betano 1": resultado_profundo["Betano 1"],
-                    "Betano X": resultado_profundo["Betano X"],
-                    "Betano 2": resultado_profundo["Betano 2"]
-                }
-                registro.update(resultado_profundo["Stats"])
-                lista_registros_finales.append(registro)
-            
-            estado_placeholder.empty()
-            
-            if lista_registros_finales:
-                df_final = pd.DataFrame(lista_registros_finales).fillna("-")
-                # Posicionar las 3 nuevas columnas al inicio de la tabla interactiva
-                columnas_fijas = ["Partido en Vivo", "Marcador", "Tiempo/Estado", "Minuto", "Betano 1", "Betano X", "Betano 2"]
-                columnas_stats = [col for col in df_final.columns if col not in columnas_fijas]
-                df_final = df_final[columnas_fijas + columnas_stats]
-                
-                tabla_placeholder.dataframe(df_final, use_container_width=True)
-                enviar_resumen_telegram(df_final)
-            
-    except Exception as e:
-        estado_placeholder.error(f"Error durante el escaneo: {str(e)}")
-    finally:
-        if driver:
-            driver.quit()
+                if lista_registros_finales:
+                    df_final = pd.DataFrame(lista_registros_finales).fillna("-")
+                    columnas_fijas = ["Partido en Vivo", "Marcador", "Tiempo/Estado", "Minuto", "Betano 1", "Betano X", "Betano 2"]
+                    columnas_stats = [col for col in df_final.columns if col not in columnas_fijas]
+                    df_final = df_final[columnas_fijas + columnas_stats]
+                    
+                    tabla_placeholder.dataframe(df_final, use_container_width=True)
+                    enviar_resumen_telegram(df_final)
+                    
+        except Exception as e:
+            st.error(f"Error en la sesión del navegador: {str(e)}")
+        finally:
+            if context: context.close()
+            if browser: browser.close()
 
     time.sleep(60)
     st.rerun()
