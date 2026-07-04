@@ -6,11 +6,11 @@ import time
 import subprocess
 import requests
 
-# --- 1. COMPROBACIÓN E INSTALACIÓN INTERNA DIRECTA (Original sin --with-deps) ---
+# --- 1. COMPROBACIÓN E INSTALACIÓN INTERNA DIRECTA ---
 if 'navegador_configurado' not in st.session_state:
-    with st.spinner("Inicializando binarios de Playwright en el servidor... (Solo la primera vez)"):
+    with st.spinner("Configurando entorno aislado de navegación... (Solo la primera vez)"):
         try:
-            # Volvemos al comando simple que ya te funcionaba perfectamente
+            # Forzamos a playwright a instalar solo el binario de ejecución ligera
             subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             st.session_state['navegador_configurado'] = True
         except Exception as e:
@@ -38,7 +38,6 @@ def enviar_resumen_telegram(df):
         for _, fila in df.iterrows():
             mensaje += f"⚽ *{fila['Partido en Vivo']}*\n"
             mensaje += f"🏆 *Marcador:* `{fila['Marcador']}` | *Min:* `{fila['Minuto']}`\n"
-            # Agregamos los 3 campos nuevos de forma compacta en Telegram
             mensaje += f"💰 *Betano:* [1: {fila['Betano 1']}] [X: {fila['Betano X']}] [2: {fila['Betano 2']}]\n"
             
             stats_disponibles = []
@@ -64,7 +63,6 @@ def enviar_resumen_telegram(df):
 
 # --- 3. EXTRACCIÓN DE DATOS DE PARTIDOS ---
 def extraer_estadisticas_partido(context, url_partido):
-    # Creamos los 3 campos nuevos inicializados en guiones junto a los demás datos fijos
     datos_partido = {
         "Marcador": "- - -", "Tiempo/Estado": "-", "Minuto": "-", 
         "Betano 1": "-", "Betano X": "-", "Betano 2": "-", 
@@ -78,7 +76,6 @@ def extraer_estadisticas_partido(context, url_partido):
         page.goto(url_partido, timeout=7000, wait_until="domcontentloaded")
         page.wait_for_selector("div.detailScore__wrapper", timeout=4000)
         
-        # Datos principales
         marcador_el = page.locator("div.detailScore__wrapper").first
         if marcador_el.count() > 0: datos_partido["Marcador"] = marcador_el.text_content(timeout=500).strip()
             
@@ -88,7 +85,7 @@ def extraer_estadisticas_partido(context, url_partido):
         minuto_el = page.locator("span.eventTime").first
         if minuto_el.count() > 0: datos_partido["Minuto"] = minuto_el.text_content(timeout=500).strip()
             
-        # EXTRAER LOS 3 CAMPOS NUEVOS (Cuotas de Betano usando el data-testid exacto)
+        # Pestaña de Cuotas (3 Nuevos Campos de Betano)
         boton_cuotas = page.locator("//button[@role='tab' and contains(., 'Cuotas')]").first
         if boton_cuotas.count() > 0:
             boton_cuotas.click(timeout=1000)
@@ -102,7 +99,7 @@ def extraer_estadisticas_partido(context, url_partido):
                     datos_partido["Betano X"] = celdas_cuotas[1].text_content().strip()
                     datos_partido["Betano 2"] = celdas_cuotas[2].text_content().strip()
             
-        # Regresar y extraer Estadísticas habituales
+        # Pestaña de Estadísticas
         boton_stats = page.locator("//button[@role='tab' and contains(., 'Estadísticas')]").first
         if boton_stats.count() > 0:
             boton_stats.click(timeout=1000)
@@ -141,7 +138,12 @@ def contenedor_monitoreo_vivo():
         browser = None
         context = None
         try:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
+            # Forzamos la ejecución usando el binario de shell headless ligero nativo de Playwright para evitar dependencias gráficas faltantes
+            browser = p.chromium.launch(
+                headless=True, 
+                executable_path=os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH", None),
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--disable-software-rasterizer"]
+            )
             context = browser.new_context(user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
             
             main_page = context.new_page()
@@ -175,7 +177,6 @@ def contenedor_monitoreo_vivo():
                     
                     resultado_profundo = extraer_estadisticas_partido(context, url_match_stats)
                     
-                    # Guardamos la estructura fija con las 3 columnas nuevas
                     registro = {
                         "Partido en Vivo": f"{nom_local} vs {nom_visitante}",
                         "Marcador": resultado_profundo["Marcador"],
@@ -196,7 +197,6 @@ def contenedor_monitoreo_vivo():
                 if lista_registros_finales:
                     df_final = pd.DataFrame(lista_registros_finales).fillna("-")
                     
-                    # Las 3 nuevas columnas quedan fijadas al inicio de la tabla
                     columnas_fijas = ["Partido en Vivo", "Marcador", "Tiempo/Estado", "Minuto", "Betano 1", "Betano X", "Betano 2"]
                     columnas_stats = [col for col in df_final.columns if col not in columnas_fijas]
                     df_final = df_final[columnas_fijas + columnas_stats]
