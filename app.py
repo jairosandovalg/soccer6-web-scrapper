@@ -6,12 +6,12 @@ import time
 import subprocess
 import requests
 
-# --- 1. COMPROBACIÓN E INSTALACIÓN DE NAVEGADOR Y PAQUETES ---
+# --- 1. COMPROBACIÓN E INSTALACIÓN INTERNA DIRECTA (Original sin --with-deps) ---
 if 'navegador_configurado' not in st.session_state:
-    with st.spinner("Configurando el entorno del servidor... (Esto puede tomar 1-2 minutos la primera vez)"):
+    with st.spinner("Inicializando binarios de Playwright en el servidor... (Solo la primera vez)"):
         try:
-            # Instalamos chromium y forzamos la instalación de las librerías de Linux faltantes (--with-deps)
-            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium", "--with-deps"], check=True)
+            # Volvemos al comando simple que ya te funcionaba perfectamente
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
             st.session_state['navegador_configurado'] = True
         except Exception as e:
             st.error(f"Error al inicializar el entorno del navegador: {str(e)}")
@@ -175,7 +175,7 @@ def contenedor_monitoreo_vivo():
                     
                     resultado_profundo = extraer_estadisticas_partido(context, url_match_stats)
                     
-                    # Estructura del registro mapeando las nuevas claves
+                    # Guardamos la estructura fija con las 3 columnas nuevas
                     registro = {
                         "Partido en Vivo": f"{nom_local} vs {nom_visitante}",
                         "Marcador": resultado_profundo["Marcador"],
@@ -196,7 +196,7 @@ def contenedor_monitoreo_vivo():
                 if lista_registros_finales:
                     df_final = pd.DataFrame(lista_registros_finales).fillna("-")
                     
-                    # Ordenamos para asegurar que aparezcan las 3 nuevas columnas al inicio
+                    # Las 3 nuevas columnas quedan fijadas al inicio de la tabla
                     columnas_fijas = ["Partido en Vivo", "Marcador", "Tiempo/Estado", "Minuto", "Betano 1", "Betano X", "Betano 2"]
                     columnas_stats = [col for col in df_final.columns if col not in columnas_fijas]
                     df_final = df_final[columnas_fijas + columnas_stats]
